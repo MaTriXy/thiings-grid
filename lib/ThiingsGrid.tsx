@@ -127,6 +127,9 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
   private cachedWidth: number;
   private cachedHeight: number;
   private lastGridCenter: Position;
+  // Mutable animation values — bypasses React's Readonly<State> for perf
+  private animOffset: Position;
+  private animVelocity: Position;
 
   constructor(props: ThiingsGridProps) {
     super(props);
@@ -151,6 +154,8 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
     this.cachedWidth = 0;
     this.cachedHeight = 0;
     this.lastGridCenter = { x: Infinity, y: Infinity };
+    this.animOffset = { ...offset };
+    this.animVelocity = { x: 0, y: 0 };
     this.debouncedUpdateGridItems = throttle(
       this.updateGridItems,
       UPDATE_INTERVAL,
@@ -219,14 +224,17 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
     return this.state.offset;
   };
 
-  private calculateVisiblePositions = (): Position[] | null => {
+  private calculateVisiblePositions = (
+    offset?: Position
+  ): Position[] | null => {
     const width = this.cachedWidth;
     const height = this.cachedHeight;
     if (width === 0 && height === 0) return null;
 
     // Calculate center position based on offset
-    const centerX = -Math.round(this.state.offset.x / this.props.gridSize);
-    const centerY = -Math.round(this.state.offset.y / this.props.gridSize);
+    const o = offset || this.state.offset;
+    const centerX = -Math.round(o.x / this.props.gridSize);
+    const centerY = -Math.round(o.y / this.props.gridSize);
 
     // Skip recalculation if the grid center hasn't moved to a new cell
     if (
@@ -302,19 +310,38 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
     }
   };
 
+  private applyTransformDirect = () => {
+    if (this.transformRef.current) {
+      this.transformRef.current.style.transform = `translate3d(${this.animOffset.x}px, ${this.animOffset.y}px, 0)`;
+    }
+  };
+
+  // Sync mutable animation values back into React state
+  private syncStateFromAnim = () => {
+    this.setState(
+      {
+        offset: { ...this.animOffset },
+        velocity: { ...this.animVelocity },
+      },
+      this.updateGridItems
+    );
+  };
+
   private updateGridItems = () => {
     if (!this.isComponentMounted) return;
+
+    // Use animOffset if animating (it's ahead of React state), else use state
+    const currentOffset = this.animationFrame
+      ? this.animOffset
+      : this.state.offset;
 
     // Always update the DOM transform directly (fast, no React overhead)
     this.applyTransform();
 
-    const positions = this.calculateVisiblePositions();
+    const positions = this.calculateVisiblePositions(currentOffset);
     if (positions === null) {
       // Grid center unchanged — only update moving state, skip expensive re-render
-      const distanceFromRest = getDistance(
-        this.state.offset,
-        this.state.restPos
-      );
+      const distanceFromRest = getDistance(currentOffset, this.state.restPos);
       const isMoving = distanceFromRest > 5;
       if (isMoving !== this.state.isMoving) {
         this.setState({ isMoving });
@@ -331,9 +358,14 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
       };
     });
 
-    const distanceFromRest = getDistance(this.state.offset, this.state.restPos);
+    const distanceFromRest = getDistance(currentOffset, this.state.restPos);
 
-    this.setState({ gridItems: newItems, isMoving: distanceFromRest > 5 });
+    // Sync animation offset into React state when grid cells change
+    this.setState({
+      gridItems: newItems,
+      isMoving: distanceFromRest > 5,
+      offset: { ...currentOffset },
+    });
 
     this.debouncedStopMoving();
   };
@@ -345,15 +377,14 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
     const deltaTime = currentTime - this.lastUpdateTime;
 
     if (deltaTime >= UPDATE_INTERVAL) {
-      const { velocity, offset } = this.state;
+      const { animVelocity, animOffset } = this;
       const speed = Math.sqrt(
-        velocity.x * velocity.x + velocity.y * velocity.y
+        animVelocity.x * animVelocity.x + animVelocity.y * animVelocity.y
       );
 
       if (speed < MIN_VELOCITY) {
-        this.state.velocity = { x: 0, y: 0 };
-        this.applyTransform();
-        this.debouncedUpdateGridItems();
+        this.animVelocity = { x: 0, y: 0 };
+        this.syncStateFromAnim();
         return;
       }
 
@@ -363,20 +394,18 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
       // Scale position change by deltaTime for smooth, frame-rate-independent motion
       const dt = deltaTime / UPDATE_INTERVAL;
 
-      // Mutate state directly to avoid React re-render overhead during animation.
-      // The DOM transform is applied directly; React state is synced via
-      // debouncedUpdateGridItems only when grid cells need to change.
-      this.state.offset = {
-        x: offset.x + velocity.x * dt,
-        y: offset.y + velocity.y * dt,
+      // Update mutable animation values (no React overhead)
+      this.animOffset = {
+        x: animOffset.x + animVelocity.x * dt,
+        y: animOffset.y + animVelocity.y * dt,
       };
-      this.state.velocity = {
-        x: velocity.x * deceleration,
-        y: velocity.y * deceleration,
+      this.animVelocity = {
+        x: animVelocity.x * deceleration,
+        y: animVelocity.y * deceleration,
       };
 
       // Apply transform directly to DOM — no React overhead
-      this.applyTransform();
+      this.applyTransformDirect();
 
       // Only trigger React re-render when visible grid cells change
       this.debouncedUpdateGridItems();
@@ -467,6 +496,9 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
           };
 
     this.lastUpdateTime = performance.now();
+    // Seed mutable animation values from current state before starting animation
+    this.animOffset = { ...this.state.offset };
+    this.animVelocity = { ...velocity };
     this.setState({ isDragging: false, velocity });
     this.animationFrame = requestAnimationFrame(this.animate);
   };
