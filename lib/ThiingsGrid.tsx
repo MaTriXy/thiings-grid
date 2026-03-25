@@ -384,6 +384,7 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
 
       if (speed < MIN_VELOCITY) {
         this.animVelocity = { x: 0, y: 0 };
+        this.animationFrame = null;
         this.syncStateFromAnim();
         return;
       }
@@ -419,6 +420,7 @@ class ThiingsGrid extends Component<ThiingsGridProps, State> {
   private handleDown = (p: Position) => {
     if (this.animationFrame) {
       cancelAnimationFrame(this.animationFrame);
+      this.animationFrame = null;
     }
 
     this.setState({
